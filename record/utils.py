@@ -53,7 +53,7 @@ def create_tailing_cursor(collection, criteria, oplog=False):
     """Create a cursor that constantly tail the latest documents from the
        database"""
     tailer = collection.find(
-        criteria, slave_okay=True, tailable=True, await_data=False)
+        criteria, slave_okay=True, tailable=True, await_data=True, timeout=False)
     
     # Set oplog_replay on the cursor, which allows queries against the oplog to run much faster
     if oplog:

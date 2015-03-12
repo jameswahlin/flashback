@@ -12,6 +12,8 @@ import time
 import utils
 import signal
 import merge
+import sys
+import os
 
 
 def tail_to_queue(tailer, identifier, doc_queue, state, end_time,
@@ -24,24 +26,44 @@ def tail_to_queue(tailer, identifier, doc_queue, state, end_time,
     @param check_duration_secs: if we cannot retrieve the latest document,
         it will sleep for a period of time and then try again.
     """
+
+    print("start tail_to_queue: {0}").format(identifier)
+
     tailer_state = state.tailer_states[identifier]
-    while tailer.alive and all(s.alive for s in state.tailer_states.values()):
-        try:
-            doc = tailer.next()
-            tailer_state.last_received_ts = doc["ts"]
-            if state.timeout and tailer_state.last_received_ts >= end_time:
-                break
+    stop_loop = False
 
-            if type(tailer_state.last_received_ts) is Timestamp:
-                tailer_state.last_received_ts.as_datetime()
+    while not stop_loop:
 
-            doc_queue.put_nowait((identifier, doc))
-            tailer_state.entries_received += 1
-        except StopIteration:
-            if state.timeout:
-                break
-            tailer_state.last_get_none_ts = datetime.now()
-            time.sleep(check_duration_secs)
+        while (tailer.alive):
+            try:
+                doc = tailer.next()
+                tailer_state.last_received_ts = doc["ts"]
+                if state.timeout and (tailer_state.last_received_ts >= end_time 
+                        or datetime.now() > (end_time+60)):
+                    print("stop loop: {0}").format(identifier)
+                    stop_loop = True
+                    break
+
+                if type(tailer_state.last_received_ts) is Timestamp:
+                    tailer_state.last_received_ts.as_datetime()
+
+                doc_queue.put_nowait((identifier, doc))
+                tailer_state.entries_received += 1
+            except StopIteration:
+                if state.timeout:
+                    print("stop loop2: {0}").format(identifier)
+                    stop_loop = True
+                    break
+                tailer_state.last_get_none_ts = datetime.now()
+                time.sleep(check_duration_secs)
+            except:
+                print "Unexpected error:", sys.exc_info()[0]
+                os.exit(1)
+        else:
+            print("Not alive: {0}").format(identifier)
+
+        time.sleep(check_duration_secs)
+
     tailer_state.alive = False
     utils.LOG.info("source %s: Tailing to queue completed!", identifier)
 
@@ -60,7 +82,7 @@ class MongoQueryRecorder(object):
             """Return the tailer state "struct" """
             s = utils.EmptyClass()
             s.entries_received = 0
-            s. entries_written = 0
+            s.entries_written = 0
             s.alive = True
             s.last_received_ts = None
             s.last_get_none_ts = None
@@ -215,19 +237,25 @@ class MongoQueryRecorder(object):
                     utils.LOG.error(
                         "Thread %s didn't exit after %d seconds. Will wait for "
                         "another %d seconds", name, wait_secs, 2 * wait_secs)
+
+                    for item in state.tailer_states.keys():
+                        if state.tailer_states[item].alive:
+                            print("Waiting for {0}").format(item)
+
                     wait_secs *= 2
                     thread.join(wait_secs)
                 else:
                     utils.LOG.info("Thread %s exits normally.", name)
 
-    @utils.set_interval(3)
+    @utils.set_interval(10)
     def _periodically_report_status(self, state):
         return MongoQueryRecorder._report_status(state)
 
     def record(self):
         """record the activities in the multithreading way"""
         start_utc_secs = utils.now_in_utc_secs()
-        end_utc_secs = utils.now_in_utc_secs() + self.config["duration_secs"]
+        print("Duration: " + str(self.config["duration_secs"]) + " seconds")
+        end_utc_secs = start_utc_secs + self.config["duration_secs"]
         # We'll dump the recorded activities to `files`.
         files = {
             "oplog": open(self.config["oplog_output_file"], "wb")
@@ -244,7 +272,7 @@ class MongoQueryRecorder(object):
                 files[tailer_name]= open(tailer_name, "wb")
                 
         tailer_names.append("oplog")
-        state = MongoQueryRecorder. RecordingState(tailer_names)
+        state = MongoQueryRecorder.RecordingState(tailer_names)
         
         # Create a series working threads to handle to track/dump mongodb
         # activities. On return, these threads have already started.
@@ -253,10 +281,11 @@ class MongoQueryRecorder(object):
         timer_control = self._periodically_report_status(state)
 
         # Waiting till due time arrives
-        while all(s.alive for s in state.tailer_states.values()) \
-                and (utils.now_in_utc_secs() < end_utc_secs) \
+        while (utils.now_in_utc_secs() < end_utc_secs) \
                 and not self.force_quit:
             time.sleep(1)
+
+        print("Exit wait until time expiration loop")
 
         state.timeout = True
 
