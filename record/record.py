@@ -2,7 +2,7 @@
 r""" Track the MongoDB activities by tailing oplog and profiler output"""
 
 from bson.timestamp import Timestamp
-from datetime import datetime
+from datetime import datetime, timedelta
 from pymongo import MongoClient, uri_parser
 from threading import Thread
 import config
@@ -28,13 +28,15 @@ def tail_to_queue(tailer, identifier, doc_queue, state, end_time,
     print("start tail_to_queue: {0}").format(identifier)
 
     tailer_state = state.tailer_states[identifier]
+    cutoff_time = end_time + timedelta(seconds=60)
 
     while tailer.alive:
         try:
             doc = tailer.next()
             tailer_state.last_received_ts = doc["ts"]
-            if state.timeout and (tailer_state.last_received_ts >= end_time
-                    or datetime.now() > (end_time+60)):
+            if state.timeout and (
+                    tailer_state.last_received_ts >= end_time or
+                    datetime.now() > cutoff_time):
                 print("stop loop: {0}").format(identifier)
                 break
 
@@ -173,6 +175,8 @@ class MongoQueryRecorder(object):
                                         self.config["target_collections"],
                                         Timestamp(start_utc_secs, 0))
         oplog_cursor_id = tailer.cursor_id
+        start_datetime = datetime.utcfromtimestamp(start_utc_secs)
+        end_datetime = datetime.utcfromtimestamp(end_utc_secs)
         workers_info.append({
             "name": "tailing-oplogs",
             "on_close":
@@ -180,12 +184,10 @@ class MongoQueryRecorder(object):
             "thread": Thread(
                 target=tail_to_queue,
                 args=(tailer, "oplog", doc_queue, state,
-                      Timestamp(end_utc_secs, 0)))
+                      end_datetime))
         })
 
-        start_datetime = datetime.utcfromtimestamp(start_utc_secs)
-        end_datetime = datetime.utcfromtimestamp(end_utc_secs)
-        for profiler_name,client in self.profiler_clients.items():
+        for profiler_name, client in self.profiler_clients.items():
             # create a profile collection tailer for each db
             for db in self.config["target_databases"]:
                 tailer = utils.get_profiler_tailer(client,
