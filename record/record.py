@@ -12,8 +12,6 @@ import time
 import utils
 import signal
 import merge
-import sys
-import os
 
 
 def tail_to_queue(tailer, identifier, doc_queue, state, end_time,
@@ -30,39 +28,33 @@ def tail_to_queue(tailer, identifier, doc_queue, state, end_time,
     print("start tail_to_queue: {0}").format(identifier)
 
     tailer_state = state.tailer_states[identifier]
-    stop_loop = False
 
-    while not stop_loop:
+    while tailer.alive:
+        try:
+            doc = tailer.next()
+            tailer_state.last_received_ts = doc["ts"]
+            if state.timeout and (tailer_state.last_received_ts >= end_time
+                    or datetime.now() > (end_time+60)):
+                print("stop loop: {0}").format(identifier)
+                break
 
-        while (tailer.alive):
-            try:
-                doc = tailer.next()
-                tailer_state.last_received_ts = doc["ts"]
-                if state.timeout and (tailer_state.last_received_ts >= end_time 
-                        or datetime.now() > (end_time+60)):
-                    print("stop loop: {0}").format(identifier)
-                    stop_loop = True
-                    break
+            if type(tailer_state.last_received_ts) is Timestamp:
+                tailer_state.last_received_ts.as_datetime()
 
-                if type(tailer_state.last_received_ts) is Timestamp:
-                    tailer_state.last_received_ts.as_datetime()
-
-                doc_queue.put_nowait((identifier, doc))
-                tailer_state.entries_received += 1
-            except StopIteration:
-                if state.timeout:
-                    print("stop loop2: {0}").format(identifier)
-                    stop_loop = True
-                    break
-                tailer_state.last_get_none_ts = datetime.now()
-                time.sleep(check_duration_secs)
-            except:
-                print "Unexpected error:", sys.exc_info()[0]
-                os.exit(1)
-        else:
-            print("Not alive: {0}").format(identifier)
-
-        time.sleep(check_duration_secs)
+            doc_queue.put_nowait((identifier, doc))
+            tailer_state.entries_received += 1
+        except StopIteration:
+            if state.timeout:
+                print("stop loop2: {0}").format(identifier)
+                break
+            tailer_state.last_get_none_ts = datetime.now()
+            time.sleep(check_duration_secs)
+        except Exception as e:
+            print "Unexpected error:", str(e)
+            break
+    else:
+        print("Cursor died before end of iteration: {0}"
+              .format(identifier))
 
     tailer_state.alive = False
     utils.LOG.info("source %s: Tailing to queue completed!", identifier)
@@ -90,7 +82,7 @@ class MongoQueryRecorder(object):
 
         def __init__(self, tailer_names):
             self.timeout = False
-            
+
             self.tailer_states = {}
             for name in tailer_names:
                 self.tailer_states[name] = self.make_tailer_state()
@@ -118,7 +110,7 @@ class MongoQueryRecorder(object):
             self.profiler_clients[server_string] = MongoClient(mongodb_uri,
                                                                slaveOk=True)
             utils.LOG.info("profiling server %d: %s", index, str(server))
-            
+
         utils.LOG.info("oplog server: %s", str(oplog_server))
 
     @staticmethod
@@ -270,10 +262,10 @@ class MongoQueryRecorder(object):
                 tailer_names.append(tailer_name)
                 profiler_output_files.append(tailer_name)
                 files[tailer_name]= open(tailer_name, "wb")
-                
+
         tailer_names.append("oplog")
         state = MongoQueryRecorder.RecordingState(tailer_names)
-        
+
         # Create a series working threads to handle to track/dump mongodb
         # activities. On return, these threads have already started.
         workers_info = self._generate_workers(files, state, start_utc_secs,
